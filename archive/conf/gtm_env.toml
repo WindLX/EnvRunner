@@ -1,0 +1,152 @@
+[envelope]
+alpha = [0, 10]
+beta = [-10, 10]
+theta = [-5, 15]
+phi = [-30, 30]
+gamma = [-5.0, 5.0]
+# V_{SR} = 155
+tas = [180.0, 450.0]
+nz = [-1.0, 2.22]
+
+[simulation]
+is_fullscale = true
+dt = 0.01
+seed = "@None"
+max_episode_steps = 15000
+
+[simulation.protection]
+# low high bound_coeff
+p = [-720.0, 720.0]
+q = [-720.0, 720.0]
+r = [-720.0, 720.0]
+nz = [-10.0, 10.0]
+altitude = [1000.0, 20000.0]
+
+[render.csv]
+filename = "temp/csv_render/output.csv"
+output_dir = "temp/csv_render/"
+
+[render.tcp]
+# host = "192.168.192.10"
+# host = "192.168.5.110"
+host = "127.0.0.1"
+# port = 15000
+port = 8888
+
+[wrapper.interpolation_plan_mpc]
+act_exec_step = 3
+plan_interval_steps = 5
+method = "linear"
+
+[wrapper.ema_action]
+alpha = 0.3
+
+[wrapper.continuous_noise]
+noise_prob = 0.2
+dim_prob = 0.2
+noise_std = 0.7
+smoothing_factor = 0.3
+max_block_len_ratio = 0.5
+
+[pilot]
+on = false
+K_p = 1.0
+delay = 0.1
+T_I = 1
+T_L = 1
+T_N = 0.1
+
+[wind]
+# random or constant or none
+method = "random"
+# if use constant method, just set the wind direction, degree
+direction = [0.0, 360.0]
+# if use constant method, just set the wind speed, m/s
+speed = [0.0, 20.0]
+# none, light, moderate, severe
+level = "moderate"
+
+# [wind]
+# method = "none"
+[uncertain]
+# random or constant
+method = "random"
+W = [-0.1, 0.1]
+I = [
+    [-0.05, -0.05, -0.05, -0.05, -0.05, -0.05],
+    [0.05, 0.05, 0.05, 0.05, 0.05, 0.05],
+]
+c_static = [
+    [-0.1, -0.1, -0.1, -0.1, -0.1, -0.1],
+    [0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+]
+c_a = [[-0.1, -0.1, -0.1, -0.1, -0.1, -0.1], [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]]
+c_r = [[-0.1, -0.1, -0.1, -0.1, -0.1, -0.1], [0.1, 0.1, 0.1, 0.1, 0.1, 0.1]]
+c_e = [[-0.1, 0.0, -0.1, 0.0, -0.1, 0.0], [0.1, 0.0, 0.1, 0.0, 0.1, 0.0]]
+
+# [uncertain]
+# method = "constant"
+# W = 0.0
+# I = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+# c_static = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+# c_a = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+# c_r = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+# c_e = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+# [init]
+# + *constant*
+#   data define:
+#       [u, v, w, p, q, r, lat, lon, alt, phi, theta, psi, elevator, aileron, rudder, throttle] in degrees
+# + *normal* (directly random init state)
+#   data define:
+#       [u, v, w, p, q, r, lat, lon, alt, phi, theta, psi, elevator, aileron, rudder, throttle] in degrees
+# + *bound* (random based on bound and air angle)
+#   data define:
+#       [v, alpha, beta, gamma, phi, theta, p, q, r, alt, elevator, aileron, rudder, throttle]
+# + *two_bound* (random based on bound and air angle, and the bound is two area)
+#   for example: I hope alpha to random in area [-20, -10] and [10, 20]
+# + *constant_bound*
+#   data define:
+#       [v, alpha, beta, gamma, phi, theta, p, q, r, alt, elevator, aileron, rudder, throttle]
+[init]
+method = "bound"
+low = [100, 0, -30, -80, -120, -45, -90, -60, -60, 8000, -5, -5, -5, 0]
+high = [300, 60, 30, -10, 120, 45, 90, 60, 60, 13000, 0, 5, 5, 30]
+
+# [init]
+# method = "constant_bound"
+# value = [70, 45, 30, 0, 60, 25, 25, 15, 35, 10000, 0, 0, 0, 20]
+[reward.reward_coeff]
+# --- 核心引导 (Guidance) ---
+guidance_coeff = 10.0 # 将微弱的势能增量信号放大为标准强度的奖励
+attitude_weight = 1.0 # 姿态势能的权重
+aerodynamics_weight = 1.0 # 气动势能的权重
+structural_weight = 1.0 # 结构势能的权重
+flight_path_weight = 1.0 # 飞行路径势能的权重
+# --- 安全约束 (Safety) ---
+p_penalty_coeff = 5.0 # 滚转角速率的势垒惩罚系数
+q_penalty_coeff = 5.0 # 俯仰角速率的势垒惩罚系数
+r_penalty_coeff = 5.0 # 偏航角速率的势垒惩罚系数
+nz_penalty_coeff = 5.0 # 过载的势垒惩罚系数
+safety_margin_factor = 0.5 # 安全裕度，在达到极限的80%时开始惩罚
+# --- 性能成本 (Cost) ---
+energy_loss_coeff = 0.09 # 能量耗散（负E_dot）的成本系数
+smoothness_coeff = 120.0 # 操作平滑度（阻尼动作速率）的成本系数
+time_coeff = 0.001 # 时间流逝的成本系数
+# --- 平滑度奖励专用超参数 ---
+ema_alpha_v = 0.1 # 动作速率的EMA平滑因子
+ema_alpha_e_dot = 0.1 # E_dot的EMA平滑因子
+ema_alpha_alpha = 0.4 # alpha的EMA平滑因子
+ema_alpha_beta = 0.4 # beta的EMA平滑因子
+ema_alpha_tas = 0.4 # tas的EMA平滑因子
+# --- 其他 ---
+success_bonus_coeff = 0.1
+success_duration = 200 # 200 steps (~2s) in the envelope to count as success
+
+[stable_envelope]
+alpha = [0.0, 8.0]
+beta = [-3.0, 3.0]
+theta = [-5.0, 10.0]
+phi = [-10.0, 10.0]
+gamma = [-1.0, 1.0]
+tas = [220.0, 400.0]
+nz = [-0.5, 1.5]

@@ -1,0 +1,22 @@
+[project]
+name = "envrunner"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [{ name = "windlx", email = "1418043337@qq.com" }]
+requires-python = ">=3.12"
+dependencies = ["gymnasium>=1.2.0", "numpy>=2.3.3"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/envrunner"]
+
+[dependency-groups]
+dev = [
+    "polars>=1.33.1",
+    "pytest>=8.4.2",
+    "torch>=2.8.0",
+]
