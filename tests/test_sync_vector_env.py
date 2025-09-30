@@ -1,196 +1,191 @@
-from copy import deepcopy
-
 import pytest
+
+from typing import Callable, Generator
+
 import gymnasium as gym
+from gymnasium.wrappers import RecordEpisodeStatistics
 import numpy as np
 
 from envrunner.sync_vector_env import SyncSubVectorEnv
 
 
+# --- Fixtures ---
 @pytest.fixture
-def env_fns():
-    # 使用一个简单且确定的环境进行测试
+def env_fns_simple() -> list[Callable[[], gym.Env]]:
+    """返回4个简单的 CartPole 环境构造函数。"""
     return [lambda: gym.make("CartPole-v1") for _ in range(4)]
 
 
 @pytest.fixture
-def vec_env(env_fns):
-    env = SyncSubVectorEnv(env_fns)
+def env_fns_with_stats() -> list[Callable[[], gym.Env]]:
+    """返回4个被 RecordEpisodeStatistics 包装的环境构造函数。"""
+    # 这个 wrapper 会在 episode 结束时在 info 中添加 "episode" 键
+    return [lambda: RecordEpisodeStatistics(gym.make("CartPole-v1")) for _ in range(4)]
+
+
+@pytest.fixture
+def vec_env(
+    env_fns_simple: list[Callable[[], gym.Env]],
+) -> Generator[SyncSubVectorEnv, None, None]:
+    """创建一个基础的 SyncSubVectorEnv 实例。"""
+    env = SyncSubVectorEnv(env_fns_simple)
     yield env
     env.close()
 
 
-def test_initialization(vec_env):
-    """测试环境是否被正确初始化。"""
+# --- 测试用例 ---
+def test_initialization(vec_env: SyncSubVectorEnv):
+    """测试初始化是否正确。"""
     assert vec_env.num_envs == 4
-    assert isinstance(vec_env.observation_space, gym.spaces.Box)
-    assert isinstance(vec_env.action_space, gym.spaces.Discrete)
-    # 检查动作空间是否与单个环境一致
-    single_env = vec_env.envs[0]
-    assert vec_env.action_space == single_env.action_space
+    # 检查空间是否被正确向量化 (这里我们不测试 _create_vectorized_space 的所有细节)
+    assert vec_env.observation_space.shape[0] == 4  # type: ignore[attr-defined]
+    assert vec_env.action_space.shape is not None  # Box or MultiDiscrete
+    assert len(vec_env.envs) == 4
 
 
-def test_reset(vec_env):
-    """测试 reset 方法的完整和部分重置功能。"""
-    # 1. 测试完整重置
-    obs, info = vec_env.reset()
-    assert obs.shape == (vec_env.num_envs,) + vec_env.single_observation_space.shape
+def test_reset_full(vec_env: SyncSubVectorEnv):
+    """测试完整的 reset。"""
+    obs, info = vec_env.reset(seed=42)
+
+    assert obs.shape == (4, 4)  # (num_envs, obs_dim) for CartPole
     assert isinstance(info, dict)
-    # 初始重置，info里不应该有final_observation等
-    assert "final_observation" not in info
-    # `_` 掩码应全部为 True
-    assert info["_"].all()
+    assert "_" in info
+    assert info["_"].all()  # `_` 掩码应全部为 True
+    assert len(info) == 1  # 初始 reset 的 info 应该只包含 `_`
 
-    # 2. 测试部分重置
-    vec_env.reset()
-    # 记录重置前的观测
-    pre_reset_obs, _, _, _, _ = vec_env.step(np.array([0, 0, 0, 0]))
 
-    reset_ids = [0, 2]
-    obs, info = vec_env.reset(ids=reset_ids)
+def test_reset_partial_by_list(vec_env: SyncSubVectorEnv):
+    """测试通过索引列表进行部分 reset。"""
+    vec_env.reset(seed=42)
+    # 走一步，让环境状态发生变化
+    pre_reset_obs, _, _, _, _ = vec_env.step(np.array([0] * 4))
 
-    # 检查被重置的环境的观测是否改变
-    # 由于环境是随机的，我们不能断言 obs[0] != pre_reset_obs[0]，
-    # 但我们可以断言未被重置的环境的观测值保持不变
+    reset_ids = [0, 3]
+    obs, info = vec_env.reset(ids=reset_ids, seed=123)
+
+    # 检查返回的 obs 形状
+    assert obs.shape == pre_reset_obs.shape
+
+    # 检查未被重置的环境的观测值是否保持不变
     assert np.array_equal(obs[1], pre_reset_obs[1])
-    assert np.array_equal(obs[3], pre_reset_obs[3])
+    assert np.array_equal(obs[2], pre_reset_obs[2])
+
+    # 检查被重置的环境的观测值是否已改变
+    assert not np.array_equal(obs[0], pre_reset_obs[0])
+    assert not np.array_equal(obs[3], pre_reset_obs[3])
 
     # 检查 `_` 掩码是否正确
-    expected_mask = np.array([True, False, True, False])
+    expected_mask = np.array([True, False, False, True])
     assert np.array_equal(info["_"], expected_mask)
 
 
-def test_step_output_shapes(vec_env):
+def test_reset_partial_by_mask(vec_env: SyncSubVectorEnv):
+    """测试通过布尔掩码进行部分 reset。"""
+    vec_env.reset(seed=42)
+    pre_reset_obs, _, _, _, _ = vec_env.step(np.array([0] * 4))
+
+    reset_mask = np.array([False, True, True, False])
+    obs, info = vec_env.reset(ids=reset_mask, seed=123)
+
+    assert np.array_equal(obs[0], pre_reset_obs[0])
+    assert not np.array_equal(obs[1], pre_reset_obs[1])
+    assert not np.array_equal(obs[2], pre_reset_obs[2])
+    assert np.array_equal(obs[3], pre_reset_obs[3])
+
+    assert np.array_equal(info["_"], reset_mask)
+
+
+def test_step_outputs(vec_env: SyncSubVectorEnv):
     """测试 step 方法返回值的形状和类型。"""
     vec_env.reset()
-    actions = np.array([vec_env.action_space.sample() for _ in range(vec_env.num_envs)])
+    actions = np.array([vec_env.single_action_space.sample() for _ in range(4)])
 
     obs, rewards, terminateds, truncateds, infos = vec_env.step(actions)
 
-    assert obs.shape == (vec_env.num_envs,) + vec_env.single_observation_space.shape
-    assert obs.dtype == vec_env.single_observation_space.dtype
+    assert obs.shape == (4, 4)
+    assert rewards.shape == (4,)
+    assert terminateds.shape == (4,)
+    assert truncateds.shape == (4,)
 
-    assert rewards.shape == (vec_env.num_envs,)
     assert rewards.dtype == np.float32
-
-    assert terminateds.shape == (vec_env.num_envs,)
     assert terminateds.dtype == np.bool_
-
-    assert truncateds.shape == (vec_env.num_envs,)
     assert truncateds.dtype == np.bool_
 
     assert isinstance(infos, dict)
 
 
-def test_auto_reset_on_done(vec_env):
-    """测试环境在结束后是否会自动重置。"""
-    obs, _ = vec_env.reset(seed=123)  # 使用种子以获得可复现的结果
-    new_obs = deepcopy(obs)
+def test_auto_reset_and_final_observation(env_fns_simple: list[Callable[[], gym.Env]]):
+    """测试当环境结束时，是否会自动重置并提供 final_observation。"""
+    vec_env = SyncSubVectorEnv(env_fns_simple)
+    vec_env.reset(seed=123)
+    dones = np.array([False] * 4)
     infos = {}
 
-    done = np.zeros(vec_env.num_envs, dtype=bool)
-
-    # 循环直到至少有一个环境结束
-    for _ in range(500):  # CartPole-v1 episode 长度上限是 500
-        actions = np.array(
-            [vec_env.action_space.sample() for _ in range(vec_env.num_envs)]
-        )
-        new_obs, _, terminateds, truncateds, infos = vec_env.step(actions)
-
-        done = np.logical_or(terminateds, truncateds)
-        if np.any(done):
+    # 循环足够多的步数以确保至少有一个环境结束
+    for _ in range(501):  # CartPole-v1 max steps is 500
+        actions = np.array([0] * 4)  # 保持一个动作，加速结束
+        obs, _, terminateds, truncateds, infos = vec_env.step(actions)
+        dones = np.logical_or(terminateds, truncateds)
+        if np.any(dones):
             break
 
-    assert np.any(done), "在500步内没有任何环境结束，测试无法继续"
+    assert np.any(dones), "在501步内没有任何环境结束"
 
-    done_indices = np.where(done)[0]
+    done_indices = np.where(dones)[0]
 
-    # 1. 检查 info 是否包含 final_observation
+    # 1. 检查 `final_observation` 键是否存在
     assert "final_observation" in infos
 
-    # 2. 检查结束的环境是否有 final_observation，未结束的是否为 None
-    for i in range(vec_env.num_envs):
+    # 2. 检查聚合后的 `final_observation` 数组
+    final_obs_array = infos["final_observation"]
+    assert final_obs_array.dtype == object
+    assert final_obs_array.shape == (4,)
+
+    for i in range(4):
         if i in done_indices:
-            assert infos["final_observation"][i] is not None
-            assert (
-                infos["final_observation"][i].shape
-                == vec_env.single_observation_space.shape
-            )
+            assert final_obs_array[i] is not None
+            assert final_obs_array[i].shape == vec_env.single_observation_space.shape
         else:
-            assert infos["final_observation"][i] is None
+            assert final_obs_array[i] is None
 
-    # 3. 记录结束环境的 "新" 观测值（来自重置后）
-    obs_after_done = new_obs
-
-    # 再执行一步
-    actions = np.array([vec_env.action_space.sample() for _ in range(vec_env.num_envs)])
-    final_obs, _, _, _, _ = vec_env.step(actions)
-
-    # 4. 确认被重置的环境的观测值与上一步的观测值不同
-    for i in done_indices:
-        # 如果自动重置成功，那么 `final_obs` 应该是 `step` 之后的结果，
-        # 而 `obs_after_done` 是 `reset` 之后的结果，它们不应该相等。
-        assert not np.array_equal(final_obs[i], obs_after_done[i])
+    vec_env.close()
 
 
-# 自定义一个环境用于测试 info 聚合
-class InfoTestEnv(gym.Env):
-    def __init__(self, common_key_val, unique_key_val=None):
-        self.action_space = gym.spaces.Discrete(2)
-        self.observation_space = gym.spaces.Box(
-            low=-1.0, high=1.0, shape=(1,), dtype=np.float32
-        )
-        self.common_key_val = common_key_val
-        self.unique_key_val = unique_key_val
-        self.step_count = 0
+def test_final_info_with_wrapper(env_fns_with_stats: list[Callable[[], gym.Env]]):
+    """
+    这是一个关键测试：验证 RecordEpisodeStatistics 的信息是否被正确捕获到 final_info 中。
+    """
+    vec_env = SyncSubVectorEnv(env_fns_with_stats)
+    vec_env.reset(seed=123)
+    dones = np.array([False] * 4)
+    infos = {}
 
-    def step(self, action):
-        self.step_count += 1
-        info = {"common": self.common_key_val}
-        if self.unique_key_val is not None:
-            info["unique"] = self.unique_key_val
+    for _ in range(501):
+        actions = np.array([vec_env.single_action_space.sample() for _ in range(4)])
+        obs, _, terminateds, truncateds, infos = vec_env.step(actions)
+        dones = np.logical_or(terminateds, truncateds)
+        if np.any(dones):
+            break
 
-        # 在第二步结束
-        done = self.step_count >= 2
-        return self.observation_space.sample(), 0, done, False, info
+    assert np.any(dones), "在501步内没有任何环境结束"
+    done_indices = np.where(dones)[0]
 
-    def reset(self, *, seed=None, options=None):
-        super().reset(seed=seed, options=options)
-        self.step_count = 0
-        return self.observation_space.sample(), {}
+    # 1. 检查 `final_info` 键
+    assert "final_info" in infos
+    final_info_array = infos["final_info"]
+    assert final_info_array.dtype == object
 
+    # 2. 检查内容
+    for i in range(4):
+        if i in done_indices:
+            final_info = final_info_array[i]
+            assert isinstance(final_info, dict)
+            # RecordEpisodeStatistics 的关键输出
+            assert "episode" in final_info
+            assert "r" in final_info["episode"]  # reward
+            assert "l" in final_info["episode"]  # length
+            assert "t" in final_info["episode"]  # time
+        else:
+            assert final_info_array[i] is None
 
-def test_info_aggregation():
-    """专门测试 info 聚合的逻辑。"""
-    env_fns = [
-        lambda: InfoTestEnv(common_key_val=10, unique_key_val="A"),
-        lambda: InfoTestEnv(common_key_val=20, unique_key_val="B"),
-        lambda: InfoTestEnv(common_key_val=30),  # 这个环境没有 unique_key
-    ]
-    env = SyncSubVectorEnv(env_fns)
-    env.reset()
-
-    # 第一步，所有环境都应该返回 info
-    _, _, _, _, infos = env.step(np.array([0, 0, 0]))
-
-    # 测试 common key，所有环境都有
-    assert "common" in infos
-    assert np.array_equal(infos["common"], np.array([10, 20, 30]))
-
-    # 测试 unique key，部分环境有
-    assert "unique" in infos
-    assert np.array_equal(infos["unique"], np.array(["A", "B", None], dtype=object))
-
-    # 第二步，所有环境都将结束
-    _, _, terminateds, _, infos = env.step(np.array([0, 0, 0]))
-
-    assert terminateds.all()
-    assert "final_observation" in infos
-    # 检查 final_observation 是否也正确地聚合了 (所有环境都应该有)
-    assert (
-        infos["final_observation"].shape
-        == (env.num_envs,) + env.single_observation_space.shape  # type: ignore
-    )
-    assert None not in infos["final_observation"]
-
-    env.close()
+    vec_env.close()

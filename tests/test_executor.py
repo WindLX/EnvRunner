@@ -1,4 +1,6 @@
 import pytest
+
+from typing import Any, Generator
 import gymnasium as gym
 import numpy as np
 
@@ -14,13 +16,13 @@ TEST_CONFIGS = [
 
 
 @pytest.fixture(scope="module", params=TEST_CONFIGS)
-def executor_config(request):
+def executor_config(request: pytest.FixtureRequest) -> tuple[int, int]:
     """提供环境总数和worker数量的配置。"""
     return request.param
 
 
 @pytest.fixture
-def executor(executor_config):
+def executor(executor_config: tuple[int, int]) -> Generator[EnvExecutor, None, None]:
     """创建一个 HighPerformanceEnvExecutor 实例并确保在测试后关闭。"""
     total_envs, num_workers = executor_config
     env_fns = [lambda: gym.make("CartPole-v1") for _ in range(total_envs)]
@@ -33,7 +35,7 @@ def executor(executor_config):
     env.close()
 
 
-def test_initialization(executor, executor_config):
+def test_initialization(executor: EnvExecutor, executor_config: tuple[int, int]):
     """测试执行器是否正确初始化。"""
     total_envs, num_workers = executor_config
     assert executor.num_envs == total_envs
@@ -43,16 +45,16 @@ def test_initialization(executor, executor_config):
     assert isinstance(executor.action_space, gym.spaces.Discrete)
 
 
-def test_reset(executor):
+def test_reset(executor: EnvExecutor):
     """测试 reset 方法。"""
     obs, info = executor.reset()
-    assert obs.shape == (executor.num_envs,) + executor.single_observation_space.shape
+    assert obs.shape == (executor.num_envs,) + executor.single_observation_space.shape  # type: ignore
     assert isinstance(info, dict)
     # 初始重置不应包含 final_* 信息
     assert "final_observation" not in info
 
 
-def test_step(executor):
+def test_step(executor: EnvExecutor):
     """测试 step 方法的返回形状和类型。"""
     executor.reset()
     actions = np.array(
@@ -61,7 +63,7 @@ def test_step(executor):
 
     obs, rewards, terminateds, truncateds, infos = executor.step(actions)
 
-    assert obs.shape == (executor.num_envs,) + executor.single_observation_space.shape
+    assert obs.shape == (executor.num_envs,) + executor.single_observation_space.shape  # type: ignore
     assert rewards.shape == (executor.num_envs,)
     assert terminateds.shape == (executor.num_envs,)
     assert truncateds.shape == (executor.num_envs,)
@@ -73,7 +75,7 @@ def test_step(executor):
     assert isinstance(infos, dict)
 
 
-def test_auto_reset_and_final_info(executor_config):
+def test_auto_reset_and_final_info(executor_config: tuple[int, int]):
     """
     一个更复杂的测试，验证跨 worker 的自动重置和 final_observation 聚合。
     """
@@ -150,7 +152,7 @@ class CrashingEnv(gym.Env):
         self.action_space = gym.spaces.Discrete(2)
         self.step_count = 0
 
-    def step(self, action):
+    def step(self, action: Any) -> tuple[np.ndarray, float, bool, bool, dict]:
         self.step_count += 1
         if self.step_count >= 3:
             raise ValueError("模拟的环境崩溃!")

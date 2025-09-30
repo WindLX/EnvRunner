@@ -11,7 +11,7 @@ class SyncSubVectorEnv:
     高性能执行器作为基础组件。
 
     Args:
-        env_fns (list[Callable[[], gym.Env]]): 一个环境构造函数列表。
+        env_fns (Sequence[Callable[[], gym.Env]]): 一个环境构造函数列表。
     """
 
     def __init__(self, env_fns: Sequence[Callable[[], gym.Env]]):
@@ -135,7 +135,7 @@ class SyncSubVectorEnv:
                 self._autoreset_flags[i] = True
                 # 保存最终观测和信息
                 info["final_observation"] = obs
-                info["final_info"] = {}
+                info["final_info"] = info.copy()
 
             # 无论是否结束，都更新观测缓冲区
             # 如果结束了，这个 obs 是新 episode 的第一个 obs
