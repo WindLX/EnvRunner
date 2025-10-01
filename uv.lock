@@ -25,6 +25,7 @@ name = "envrunner"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cloudpickle" },
     { name = "gymnasium" },
     { name = "numpy" },
 ]
@@ -38,6 +39,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cloudpickle", specifier = ">=3.1.1" },
     { name = "gymnasium", specifier = ">=1.2.0" },
     { name = "numpy", specifier = ">=2.3.3" },
 ]

@@ -7,10 +7,34 @@ from multiprocessing.connection import Connection
 from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.synchronize import Barrier
 
+import cloudpickle
 import numpy as np
 import gymnasium as gym
 
 from .sync_vector_env import SyncSubVectorEnv
+
+
+class CloudpickleCallable:
+    """
+    使用 cloudpickle 序列化一个可调用对象，以便在进程间安全传递。
+    """
+
+    def __init__(self, func: Callable):
+        if not callable(func):
+            raise TypeError("传入的对象必须是可调用的 (callable)。")
+
+        # 在主进程中，使用 cloudpickle 将函数序列化为字节串
+        self.serialized_func = cloudpickle.dumps(func)
+
+    def __call__(self, *args, **kwargs):
+        """
+        在子进程中，当这个包装器实例被调用时，
+        它会反序列化函数并立即执行它。
+        """
+        # 1. 反序列化得到原始的函数对象
+        func = cloudpickle.loads(self.serialized_func)
+        # 2. 执行函数并返回结果
+        return func(*args, **kwargs)
 
 
 # --- Shared Memory Helper Functions ---
@@ -35,7 +59,8 @@ def _get_shared_memory(
 
 def worker(
     worker_id: int,
-    env_fns: Sequence[Callable[[], gym.Env]],
+    # env_fns: Sequence[Callable[[], gym.Env]],
+    env_fns_wrapper: CloudpickleCallable,
     main_pipe: Connection,
     worker_pipe: Connection,
     barrier: Barrier,
@@ -50,6 +75,7 @@ def worker(
     shm_objects = {}
     try:
         # 创建环境
+        env_fns = env_fns_wrapper()
         vec_env = SyncSubVectorEnv(env_fns)
         envs_per_worker = vec_env.num_envs
 
@@ -122,7 +148,10 @@ def worker(
 
 class EnvExecutor:
     def __init__(
-        self, env_fns: list[Callable[[], gym.Env]], num_workers: int, timeout: int = 10
+        self,
+        env_fns: Sequence[Callable[[], gym.Env]],
+        num_workers: int,
+        timeout: int = 10,
     ):
         self.timeout = timeout
         self.closed = True  # 预设为已关闭，防止异常时误操作
@@ -180,19 +209,31 @@ class EnvExecutor:
             raise e
 
         # 4. 创建通信和同步工具
-        self.pipes = [mp.Pipe() for _ in range(self.num_workers)]
+        ctx = mp.get_context("spawn")
+
+        self.pipes = [ctx.Pipe() for _ in range(self.num_workers)]
         # Barrier 等待所有 worker 和主进程
-        self.barrier = mp.Barrier(self.num_workers + 1)
+        self.barrier = ctx.Barrier(self.num_workers + 1)
 
         # 5. 创建并启动子进程
         self.workers = []
         for i in range(self.num_workers):
             main_pipe, worker_pipe = self.pipes[i]
+
+            sub_env_fns = self.worker_env_fns[i]
+
+            # 1. 创建一个返回 env_fns 列表的 lambda 构造器
+            env_fns_constructor = lambda: sub_env_fns
+
+            # 2. 使用我们自己的 CloudpickleCallable 进行包装
+            fns_wrapper = CloudpickleCallable(env_fns_constructor)
+
             proc = mp.Process(
                 target=worker,
                 args=(
                     i,
-                    self.worker_env_fns[i],
+                    fns_wrapper,
+                    # self.worker_env_fns[i],
                     main_pipe,
                     worker_pipe,
                     self.barrier,

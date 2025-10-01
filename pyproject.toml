@@ -5,7 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 authors = [{ name = "windlx", email = "1418043337@qq.com" }]
 requires-python = ">=3.12"
-dependencies = ["gymnasium>=1.2.0", "numpy>=2.3.3"]
+dependencies = [
+    "cloudpickle>=3.1.1",
+    "gymnasium>=1.2.0",
+    "numpy>=2.3.3",
+]
 
 [build-system]
 requires = ["hatchling"]
