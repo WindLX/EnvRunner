@@ -3,7 +3,7 @@ from typing import Any, Sequence
 import numpy as np
 import gymnasium as gym
 
-from . import VecEnv
+from ..base import VecEnv
 
 
 class RunningMeanStd:

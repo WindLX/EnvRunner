@@ -12,6 +12,7 @@ import numpy as np
 import gymnasium as gym
 
 from .sync_vector_env import SyncSubVectorEnv
+from .base import VecEnv
 
 
 class CloudpickleCallable:
@@ -146,7 +147,7 @@ def worker(
         worker_pipe.close()
 
 
-class EnvExecutor:
+class EnvExecutor(VecEnv):
     def __init__(
         self,
         env_fns: Sequence[Callable[[], gym.Env]],
