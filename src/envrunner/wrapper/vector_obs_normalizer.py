@@ -1,4 +1,5 @@
 from typing import Any, Sequence
+from pathlib import Path
 
 import numpy as np
 import gymnasium as gym
@@ -151,7 +152,7 @@ class VecObsNormalizer:
         normalized_next_obs = self._normalize_obs(raw_next_obs)
         return normalized_next_obs, rewards, terminateds, truncateds, infos
 
-    def save_stats(self, path: str) -> None:
+    def save_stats(self, path: Path | str) -> None:
         """保存运行时的统计数据到一个文件。"""
         np.savez(
             path,
@@ -161,7 +162,7 @@ class VecObsNormalizer:
         )
         print(f"观测归一化统计数据已保存到: {path}")
 
-    def load_stats(self, path: str) -> None:
+    def load_stats(self, path: Path | str) -> None:
         """从文件加载运行时的统计数据。"""
         try:
             with np.load(path) as data:
