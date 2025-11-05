@@ -49,6 +49,9 @@ class SyncSubVectorEnv:
         self._terminateds_buf = np.zeros((self.num_envs,), dtype=np.bool_)
         self._truncateds_buf = np.zeros((self.num_envs,), dtype=np.bool_)
 
+        # _autoreset_flags 用于标记在下一步中需要自动重置的环境
+        self._autoreset_flags = np.zeros((self.num_envs,), dtype=np.bool_)
+
     def reset(
         self,
         seed: int | list[int] | None = None,
@@ -106,6 +109,18 @@ class SyncSubVectorEnv:
         Returns:
             (observations, rewards, terminateds, truncateds, infos)
         """
+        # 1. 首先重置那些在上一步中被标记为结束的环境
+        if np.any(self._autoreset_flags):
+            reset_ids = np.where(self._autoreset_flags)[0]
+            # 注意：这里的 reset 调用返回的 obs 和 info 我们暂时不需要
+            # 因为它们对应的是新 episode 的开始，而我们需要的是上一个 episode 的最终信息
+            # gymnasium 的标准是，step 返回的 obs 是新 episode 的第一个 obs
+            # 而 info 中包含上一个 episode 的 final_observation
+            for env_id in reset_ids:
+                obs, info = self.envs[env_id].reset()
+                self._obs_buf[env_id] = obs
+            self._autoreset_flags[:] = False  # 清空标记
+
         infos = {}
         # 2. 在每个环境中执行一步
         for i in range(self.num_envs):
@@ -116,16 +131,16 @@ class SyncSubVectorEnv:
             self._truncateds_buf[i] = truncated
 
             if terminated or truncated:
+                # 标记此环境需要在下一次 step 开始时自动重置
+                self._autoreset_flags[i] = True
                 # 保存最终观测和信息
                 info["final_observation"] = obs
                 info["final_info"] = info.copy()
 
-                new_obs, new_info = self.envs[i].reset()
-
-                self._obs_buf[i] = new_obs
-                info.update(new_info)
-            else:
-                self._obs_buf[i] = obs
+            # 无论是否结束，都更新观测缓冲区
+            # 如果结束了，这个 obs 是新 episode 的第一个 obs
+            # 如果没结束，这个 obs 是当前 episode 的下一个 obs
+            self._obs_buf[i] = obs
 
             infos[f"_{i}"] = info
 
