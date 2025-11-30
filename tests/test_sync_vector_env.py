@@ -7,6 +7,7 @@ from gymnasium.wrappers import RecordEpisodeStatistics
 import numpy as np
 
 from envrunner.sync_vector_env import SyncSubVectorEnv
+from envrunner.types import AutoResetMode
 
 
 # --- Fixtures ---
@@ -187,5 +188,49 @@ def test_final_info_with_wrapper(env_fns_with_stats: list[Callable[[], gym.Env]]
             assert "t" in final_info["episode"]  # time
         else:
             assert final_info_array[i] is None
+
+    vec_env.close()
+
+
+@pytest.fixture
+def vec_env_noautoreset(
+    env_fns_simple: list[Callable[[], gym.Env]],
+) -> Generator[SyncSubVectorEnv, None, None]:
+    """创建一个基础的 SyncSubVectorEnv 实例。"""
+    env = SyncSubVectorEnv(env_fns_simple, autoreset_mode=AutoResetMode.DISABLE)
+    yield env
+    env.close()
+
+
+def test_no_autoreset_behavior(vec_env_noautoreset: SyncSubVectorEnv):
+    """测试在禁用自动重置时，环境结束的处理行为。"""
+    vec_env = vec_env_noautoreset
+    vec_env.reset(seed=123)
+    dones = np.array([False] * 4)
+    infos = {}
+
+    # 循环足够多的步数以确保至少有一个环境结束
+    for _ in range(501):  # CartPole-v1 max steps is 500
+        actions = np.array([0] * 4)  # 保持一个动作，加速结束
+        _, _, terminateds, truncateds, infos = vec_env.step(actions)
+        dones = np.logical_or(terminateds, truncateds)
+        if np.any(dones):
+            break
+
+    assert np.any(dones), "在501步内没有任何环境结束"
+
+    done_indices = np.where(dones)[0]
+
+    assert "_reset_mask" in infos
+
+    reset_mask_array = infos["_reset_mask"]
+    assert reset_mask_array.dtype == bool
+    assert reset_mask_array.shape == (4,)
+
+    for i in range(4):
+        if i in done_indices:
+            assert reset_mask_array[i] == True
+        else:
+            assert reset_mask_array[i] == False
 
     vec_env.close()

@@ -1,20 +1,25 @@
 from typing import Callable, Any, Sequence
+from deprecated import deprecated
 
 import gymnasium as gym
 import numpy as np
+
+from .types import AutoResetMode
 
 
 class SyncSubVectorEnv:
     """
     一个在单个进程内同步、串行执行多个环境的向量化环境。
-    它的行为旨在模仿 gymnasium.vector.SyncVectorEnv，但为我们后续的
-    高性能执行器作为基础组件。
 
     Args:
         env_fns (Sequence[Callable[[], gym.Env]]): 一个环境构造函数列表。
     """
 
-    def __init__(self, env_fns: Sequence[Callable[[], gym.Env]]):
+    def __init__(
+        self,
+        env_fns: Sequence[Callable[[], gym.Env]],
+        autoreset_mode: AutoResetMode = AutoResetMode.NEXT_STEP,
+    ):
         if not callable(env_fns[0]):
             raise TypeError(
                 "env_fns 必须是一个可调用对象的列表 (e.g., [lambda: gym.make('CartPole-v1')])"
@@ -23,6 +28,7 @@ class SyncSubVectorEnv:
         self.env_fns = env_fns
         self.num_envs = len(env_fns)
         self.envs = [fn() for fn in env_fns]
+        self.autoreset_mode = autoreset_mode
 
         # 从第一个环境中推断空间
         self.single_observation_space = self.envs[0].observation_space
@@ -49,8 +55,11 @@ class SyncSubVectorEnv:
         self._terminateds_buf = np.zeros((self.num_envs,), dtype=np.bool_)
         self._truncateds_buf = np.zeros((self.num_envs,), dtype=np.bool_)
 
-        # _autoreset_flags 用于标记在下一步中需要自动重置的环境
+        # NEXT_STEP 模式下 _autoreset_flags 用于标记在下一步中需要自动重置的环境
         self._autoreset_flags = np.zeros((self.num_envs,), dtype=np.bool_)
+
+        # DISABLE 模式下不进行自动重置
+        self._paused_flags = np.zeros((self.num_envs,), dtype=np.bool_)
 
     def reset(
         self,
@@ -76,6 +85,11 @@ class SyncSubVectorEnv:
         elif isinstance(ids, np.ndarray) and ids.dtype == np.bool:
             ids = np.where(ids)[0]
 
+        if len(ids) == 0:
+            infos = {}
+            infos["_"] = np.zeros(self.num_envs, dtype=bool)
+            return np.copy(self._obs_buf), infos
+
         if isinstance(seed, int):
             seeds = [seed + int(i) for i in ids]
         elif isinstance(seed, list):
@@ -95,9 +109,13 @@ class SyncSubVectorEnv:
             # 我们将每个环境的 info 存储在其自己的键下，以便稍后聚合
             infos[f"_{env_idx}"] = info
 
+            self._autoreset_flags[env_idx] = False
+            self._paused_flags[env_idx] = False
+
         return np.copy(self._obs_buf), self._aggregate_infos(infos, ids)
 
-    def step(
+    @deprecated(version="0.1.1", reason="请使用 step 方法，它支持多种 autoreset 模式。")
+    def step_old(
         self, actions: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
         """
@@ -145,6 +163,87 @@ class SyncSubVectorEnv:
             infos[f"_{i}"] = info
 
         aggregated_info = self._aggregate_infos(infos)
+        return (
+            np.copy(self._obs_buf),
+            np.copy(self._rewards_buf),
+            np.copy(self._terminateds_buf),
+            np.copy(self._truncateds_buf),
+            aggregated_info,
+        )
+
+    def step(
+        self, actions: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+
+        # --- NextStep ---
+        if self.autoreset_mode == AutoResetMode.NEXT_STEP:
+            if np.any(self._autoreset_flags):
+                reset_ids = np.where(self._autoreset_flags)[0]
+                for env_id in reset_ids:
+                    obs, info = self.envs[env_id].reset()
+                    self._obs_buf[env_id] = obs
+                self._autoreset_flags[:] = False
+
+            infos = {}
+            for i in range(self.num_envs):
+                obs, reward, terminated, truncated, info = self.envs[i].step(actions[i])
+
+                self._rewards_buf[i] = reward
+                self._terminateds_buf[i] = terminated
+                self._truncateds_buf[i] = truncated
+
+                if terminated or truncated:
+                    self._autoreset_flags[i] = True
+                    info["final_observation"] = obs
+                    info["final_info"] = info.copy()
+
+                self._obs_buf[i] = obs
+                infos[f"_{i}"] = info
+
+        # --- Disable ---
+        elif self.autoreset_mode == AutoResetMode.DISABLE:
+            infos = {}
+            # 清空 Step 缓冲区 (对于不需要 step 的环境，返回全 0)
+            self._rewards_buf[:] = 0
+            self._terminateds_buf[:] = False
+            self._truncateds_buf[:] = False
+            # 注意：_obs_buf 保持上一帧的值或被更新，我们不需要将其置零，
+            # 但为了明确表示这是占位符，如果环境已 Done，通常不需要读取 obs。
+            # 为了安全起见，我们只更新活跃环境的 obs。
+
+            for i in range(self.num_envs):
+                # 如果环境已经在等待 Reset，跳过 Step，直接填充占位符
+                if self._paused_flags[i]:
+                    # 可以在这里显式将 obs_buf 置零，或者保持最后状态
+                    # 这里选择保持最后状态，但在 info 中返回 mask 供用户过滤
+                    infos[f"_{i}"] = {}  # 空 info
+                    continue
+
+                # 正常执行 Step
+                obs, reward, terminated, truncated, info = self.envs[i].step(actions[i])
+
+                self._obs_buf[i] = obs
+                self._rewards_buf[i] = reward
+                self._terminateds_buf[i] = terminated
+                self._truncateds_buf[i] = truncated
+                infos[f"_{i}"] = info
+
+                if terminated or truncated:
+                    self._paused_flags[i] = True  # 标记为 Done，锁定环境
+                    # 按照惯例，Evaluation 时通常不需要 final_observation 这种处理，
+                    # 因为当前的 obs 就是 final 的。但为了兼容性保留原样。
+
+        else:
+            raise ValueError(f"未知的 autoreset_mode: {self.autoreset_mode}")
+
+        # 聚合 Info
+        aggregated_info = self._aggregate_infos(infos)
+
+        # [关键修改] 将环境的存活状态掩码放入 info
+        # 用户可以通过 info["_reset_mask"] 知道哪些环境停止了需要手动 reset
+        if self.autoreset_mode == AutoResetMode.DISABLE:
+            aggregated_info["_reset_mask"] = self._paused_flags.copy()
+
         return (
             np.copy(self._obs_buf),
             np.copy(self._rewards_buf),

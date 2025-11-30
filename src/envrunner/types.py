@@ -1,4 +1,5 @@
 from typing import Protocol, Any
+from enum import Enum
 
 import numpy as np
 import gymnasium as gym
@@ -14,3 +15,8 @@ class VecEnv(Protocol):
         self, actions: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]: ...
     def close(self) -> None: ...
+
+
+class AutoResetMode(Enum):
+    DISABLE = "disable"
+    NEXT_STEP = "next_step"

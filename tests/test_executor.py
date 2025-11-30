@@ -5,6 +5,7 @@ import gymnasium as gym
 import numpy as np
 
 from envrunner.env_executor import EnvExecutor
+from envrunner.types import AutoResetMode
 
 # 定义测试参数：(环境总数, worker数量)
 # 确保环境总数可以被 worker 数量整除
@@ -222,3 +223,84 @@ def test_multiple_instances():
             executor1.close()
         if executor2:
             executor2.close()
+
+
+def test_no_autoreset_behavior(executor_config: tuple[int, int]):
+    total_envs, num_workers = executor_config
+    max_episode_steps = 501
+
+    env_fns = [lambda: gym.make("CartPole-v1") for _ in range(total_envs)]
+
+    # 注意：根据上一轮的实现，参数名是 autoreset (bool)，如果你封装了 Enum 请自行转换
+    env = EnvExecutor(
+        env_fns, num_workers=num_workers, autoreset_mode=AutoResetMode.DISABLE
+    )
+
+    env.reset(seed=123)
+
+    # 这个 mask 用于在测试端记录：哪些环境已经结束了但还没被我们手动 reset
+    # 初始全为 False (都活着)
+    pending_reset_mask = np.zeros(total_envs, dtype=bool)
+
+    # 记录是否所有环境都至少结束过一次（为了验证测试的完整性）
+    all_time_done_mask = np.zeros(total_envs, dtype=bool)
+
+    for step_i in range(max_episode_steps):
+        actions = np.array([env.action_space.sample() for _ in range(total_envs)])
+
+        # obs, rewards, term, trunc, info
+        _, rewards, terminateds, truncateds, infos = env.step(actions)
+
+        # 当前这一步刚刚结束的环境
+        just_finished = np.logical_or(terminateds, truncateds)
+
+        # 更新全时段记录
+        all_time_done_mask = np.logical_or(all_time_done_mask, just_finished)
+
+        # 验证逻辑 1:
+        # 如果环境之前已经是 pending_reset 状态，那么这一步它应该返回占位符数据
+        # 即: term/trunc 应该为 False (因为没运行), reward 应该为 0
+        already_dead_indices = np.where(pending_reset_mask)[0]
+        if len(already_dead_indices) > 0:
+            assert not np.any(
+                terminateds[already_dead_indices]
+            ), "已停止的环境不应再次返回 terminated=True"
+            assert not np.any(
+                truncateds[already_dead_indices]
+            ), "已停止的环境不应再次返回 truncated=True"
+            assert np.all(
+                rewards[already_dead_indices] == 0
+            ), "已停止的环境 reward 应为 0"
+
+        # 更新当前处于等待 reset 状态的 mask
+        # 逻辑：旧的等待者 + 新的结束者 = 现在的等待者
+        pending_reset_mask = np.logical_or(pending_reset_mask, just_finished)
+
+        # 验证逻辑 2:
+        # 环境返回的 _reset_mask 必须完全等于我们自己推算的 pending_reset_mask
+        assert "_reset_mask" in infos
+        env_reset_mask = infos["_reset_mask"]
+
+        # 使用 np.array_equal 进行整体比较，或者逐个元素比较
+        np.testing.assert_array_equal(
+            env_reset_mask,
+            pending_reset_mask,
+            err_msg=f"Step {step_i}: 环境返回的 reset_mask 与预期不符",
+        )
+
+        # (可选) 模拟 Evaluation 过程：如果所有环境都结束了，我们可以选择全部 reset 或者部分 reset
+        # 为了测试持续运行，我们可以在这里不 reset，一直等到所有都跑完，
+        # 或者随机 reset 一些（如下所示）：
+        if np.any(pending_reset_mask):
+            ids_to_reset = np.where(pending_reset_mask)[0]
+            # 演示：只重置前一半已结束的环境，另一半继续保持 done 状态
+            ids_to_reset = ids_to_reset[: len(ids_to_reset) // 2]
+            if len(ids_to_reset) > 0:
+                env.reset(ids=ids_to_reset)
+                pending_reset_mask[ids_to_reset] = False  # 测试端同步更新状态
+
+    assert np.all(
+        all_time_done_mask
+    ), f"并非所有环境都在 {max_episode_steps} 步内结束。"
+
+    env.close()

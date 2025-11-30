@@ -12,7 +12,7 @@ import numpy as np
 import gymnasium as gym
 
 from .sync_vector_env import SyncSubVectorEnv
-from .base import VecEnv
+from .types import VecEnv, AutoResetMode
 
 
 class CloudpickleCallable:
@@ -60,12 +60,12 @@ def _get_shared_memory(
 
 def worker(
     worker_id: int,
-    # env_fns: Sequence[Callable[[], gym.Env]],
     env_fns_wrapper: CloudpickleCallable,
     main_pipe: Connection,
     worker_pipe: Connection,
     barrier: Barrier,
     sm_meta: dict[str, tuple[str, tuple, np.dtype]],
+    autoreset_mode: AutoResetMode = AutoResetMode.NEXT_STEP,
     timeout: int = 10,
 ):
     """子进程的工作函数。"""
@@ -77,7 +77,7 @@ def worker(
     try:
         # 创建环境
         env_fns = env_fns_wrapper()
-        vec_env = SyncSubVectorEnv(env_fns)
+        vec_env = SyncSubVectorEnv(env_fns, autoreset_mode=autoreset_mode)
         envs_per_worker = vec_env.num_envs
 
         # 连接共享内存
@@ -152,10 +152,12 @@ class EnvExecutor(VecEnv):
         self,
         env_fns: Sequence[Callable[[], gym.Env]],
         num_workers: int,
+        autoreset_mode: AutoResetMode = AutoResetMode.NEXT_STEP,
         timeout: int = 10,
     ):
         self.timeout = timeout
         self.closed = True  # 预设为已关闭，防止异常时误操作
+        self.autoreset_mode = autoreset_mode
 
         if num_workers <= 0:
             raise ValueError("num_workers 必须为正整数。")
@@ -226,7 +228,7 @@ class EnvExecutor(VecEnv):
             # 1. 创建一个返回 env_fns 列表的 lambda 构造器
             env_fns_constructor = lambda: sub_env_fns
 
-            # 2. 使用我们自己的 CloudpickleCallable 进行包装
+            # 2. 使用 CloudpickleCallable 进行包装
             fns_wrapper = CloudpickleCallable(env_fns_constructor)
 
             proc = mp.Process(
@@ -234,11 +236,12 @@ class EnvExecutor(VecEnv):
                 args=(
                     i,
                     fns_wrapper,
-                    # self.worker_env_fns[i],
                     main_pipe,
                     worker_pipe,
                     self.barrier,
                     self.sm_meta,
+                    self.autoreset_mode,
+                    self.timeout,
                 ),
                 daemon=True,  # 设置为守护进程，主进程退出时自动终止
             )
@@ -284,20 +287,80 @@ class EnvExecutor(VecEnv):
         self,
         seed: int | None = None,
         options: dict | None = None,
-        ids: list[int] | None = None,
+        ids: list[int] | np.ndarray | None = None,
     ) -> tuple[np.ndarray, dict]:
         if self.closed:
             raise gym.error.ClosedEnvironmentError("执行器已关闭。")
 
-        # TODO: 处理复杂的分布式 ids
-        if ids is not None:
-            raise NotImplementedError("部分重置 (ids) 在当前版本中尚未实现。")
+        # # TODO: 处理复杂的分布式 ids
+        # if ids is not None:
+        #     raise NotImplementedError("部分重置 (ids) 在当前版本中尚未实现。")
 
-        # 1. 向所有 worker 发送 reset 指令
-        for i in range(self.num_workers):
-            # 为每个 worker 计算种子
-            worker_seed = seed + i * self.envs_per_worker if seed is not None else None
-            self.pipes[i][0].send(("reset", {"seed": worker_seed, "options": options}))
+        # # 1. 向所有 worker 发送 reset 指令
+        # for i in range(self.num_workers):
+        #     # 为每个 worker 计算种子
+        #     worker_seed = seed + i * self.envs_per_worker if seed is not None else None
+        #     self.pipes[i][0].send(("reset", {"seed": worker_seed, "options": options}))
+
+        # 1. 准备指令数据
+        if ids is None:
+            # 全量重置
+            for i in range(self.num_workers):
+                worker_seed = (
+                    seed + i * self.envs_per_worker if seed is not None else None
+                )
+                self.pipes[i][0].send(
+                    ("reset", {"seed": worker_seed, "options": options, "ids": None})
+                )
+        else:
+            # [关键新增] 部分重置逻辑
+            ids_np = np.array(ids, dtype=int)
+            # 校验 ids 范围
+            if np.any(ids_np < 0) or np.any(ids_np >= self.num_envs):
+                raise ValueError(f"ids 包含越界索引。有效范围: 0 ~ {self.num_envs-1}")
+
+            # 计算每个 id 属于哪个 worker 以及在该 worker 内的偏移量
+            # 假设环境是按顺序分配给 worker 的
+            target_workers = ids_np // self.envs_per_worker
+            local_indices = ids_np % self.envs_per_worker
+
+            for i in range(self.num_workers):
+                # 筛选出属于当前 worker i 的 local_ids
+                mask = target_workers == i
+                worker_local_ids = local_indices[mask].tolist()
+
+                if len(worker_local_ids) > 0:
+                    # 计算种子：这里简单策略是传入 base seed，具体怎么分配由用户逻辑决定
+                    # 或者我们可以为每个子环境精确计算种子。
+                    # 为了保持一致性，如果提供了 seed，我们应该给每个被 reset 的环境一个确定的 seed
+                    # 这里简化处理：如果提供了 seed，我们传递下去，Worker 内部会根据 local_id 处理
+                    # 但 SyncSubVectorEnv 接收的是列表或单个 int。
+                    # 如果 seed 是 int，SyncSubVectorEnv 会做 seed + local_id 逻辑吗？
+                    # 让我们看看 SyncSubVectorEnv: "seed + int(i) for i in ids"
+                    # 这里 i 是 local_id。所以不同 worker 如果有相同的 local_id (0)，种子会重复。
+                    # 修正：我们需要在这里计算好种子列表，或者传递全局 offset 给 worker。
+                    # 简单方案：传递 seed 为 None 或特定列表。
+
+                    cmd_data = {"options": options, "ids": worker_local_ids}
+
+                    if seed is not None:
+                        # 重新计算该 worker 负责的这些环境的全局种子，确保唯一性
+                        # Global ID = i * per_worker + local_id
+                        # Seed = base_seed + Global ID
+                        # SyncSubVectorEnv 接收列表 seeds
+                        worker_global_ids = ids[mask]
+                        cmd_data["seed"] = [
+                            seed + int(gid) for gid in worker_global_ids
+                        ]
+                    else:
+                        cmd_data["seed"] = None
+
+                    self.pipes[i][0].send(("reset", cmd_data))
+                else:
+                    # 该 worker 没有环境需要 reset，发送空列表
+                    self.pipes[i][0].send(
+                        ("reset", {"seed": None, "options": None, "ids": []})
+                    )
 
         # 1. 收集 info
         all_infos = []

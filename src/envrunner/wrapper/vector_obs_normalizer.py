@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import gymnasium as gym
 
-from ..base import VecEnv
+from ..types import VecEnv
 
 
 class RunningMeanStd:
