@@ -1,5 +1,6 @@
 from typing import Callable, Sequence
 import uuid
+import random
 import traceback
 import threading
 import multiprocessing as mp
@@ -65,10 +66,14 @@ def worker(
     worker_pipe: Connection,
     barrier: Barrier,
     sm_meta: dict[str, tuple[str, tuple, np.dtype]],
+    startup_seed: int,
     autoreset_mode: AutoResetMode = AutoResetMode.NEXT_STEP,
     timeout: int = 10,
 ):
     """子进程的工作函数。"""
+    np.random.seed(startup_seed)
+    random.seed(startup_seed)
+
     # 1. 初始化
     main_pipe.close()  # 在子进程中关闭主进程的管道端
 
@@ -218,6 +223,10 @@ class EnvExecutor(VecEnv):
         # Barrier 等待所有 worker 和主进程
         self.barrier = ctx.Barrier(self.num_workers + 1)
 
+        worker_startup_seeds = [
+            int(np.random.randint(0, 2**31)) for _ in range(self.num_workers)
+        ]
+
         # 5. 创建并启动子进程
         self.workers = []
         for i in range(self.num_workers):
@@ -240,6 +249,7 @@ class EnvExecutor(VecEnv):
                     worker_pipe,
                     self.barrier,
                     self.sm_meta,
+                    worker_startup_seeds[i],
                     self.autoreset_mode,
                     self.timeout,
                 ),
